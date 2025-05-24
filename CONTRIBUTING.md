@@ -20,7 +20,7 @@ For a conventional development install on a machine running a recent common Linu
 python3 -m venv venv
 . venv/bin/activate
 pip install -e .
-pip install flake8 pytest
+pip install flake8 pytest mypy
 ```
 
 You can then edit code and run the `tilekiln` command.

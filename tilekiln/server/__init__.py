@@ -2,7 +2,7 @@ import json
 import os
 
 import psycopg_pool
-from fastapi import FastAPI, Response, HTTPException
+from fastapi import FastAPI, Response, HTTPException, APIRouter
 
 import tilekiln
 from tilekiln.config import Config
@@ -47,8 +47,10 @@ def change_tilejson_url(tilejson: str, baseurl: str) -> str:
 @server.on_event("startup")
 def load_server_config():
     '''Load the config for the server with static pre-rendered tiles'''
+    global config
     global storage
     global tilesets
+    config = tilekiln.load_config(os.environ[TILEKILN_CONFIG])
     # Because the DB connection variables are passed as standard PG* vars,
     # a plain ConnectionPool() will connect to the right DB
     conn = psycopg_pool.ConnectionPool(min_size=1, max_size=1, num_workers=1,
@@ -58,6 +60,24 @@ def load_server_config():
     storage = Storage(conn)
     for tileset in storage.get_tilesets():
         tilesets[tileset.id] = tileset
+
+    if config.dirty is True:
+        generate_args = {}
+        if "GENERATE_PGDATABASE" in os.environ:
+            generate_args["dbname"] = os.environ["GENERATE_PGDATABASE"]
+        if "GENERATE_PGHOST" in os.environ:
+            generate_args["host"] = os.environ["GENERATE_PGHOST"]
+        if "GENERATE_PGPORT" in os.environ:
+            generate_args["port"] = os.environ["GENERATE_PGPORT"]
+        if "GENERATE_PGUSER" in os.environ:
+            generate_args["username"] = os.environ["GENERATE_PGUSER"]
+
+        tilesets[config.id] = Tileset.from_config(storage, config)
+        generate_pool = psycopg_pool.ConnectionPool(min_size=1, max_size=1, num_workers=1,
+                                                    check=psycopg_pool.ConnectionPool.check_connection,
+                                                    kwargs=generate_args)
+        global kiln
+        kiln = Kiln(config, generate_pool)
 
 
 @live.on_event("startup")
@@ -212,3 +232,102 @@ def live_serve_tile(prefix: str, zoom: int, x: int, y:  int):
     return Response(mvt,
                     media_type=MVT_MIME_TYPE,
                     headers=STANDARD_HEADERS | headers)
+
+
+common_router = APIRouter()
+
+@common_router.get("/{prefix}/{zoom}/{x}/{y}/dirty")
+def get_dirty(prefix: str, zoom: int, x: int, y: int):
+    try:
+        config = tilekiln.load_config(os.environ[TILEKILN_CONFIG])
+
+        if config.dirty is True:
+            if prefix not in tilesets:
+                raise HTTPException(status_code=404, detail=f"Tileset '{prefix}' nicht gefunden.")
+
+            tile = Tile(zoom, x, y)
+            tileset = tilesets[prefix]
+
+            # Delete tile from storage
+            try:
+                tileset.storage.delete_tiles(prefix, {tile})
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Error during deletion: {str(e)}")
+
+            # Re-render all layers
+            new_layers = {}
+            for layer in tileset.layers:
+                try:
+                    new_layers[layer] = kiln.render_layer(layer, tile)
+                except Exception as e:
+                    raise HTTPException(status_code=500, detail=f"Error when rendering layer '{layer}': {str(e)}")
+
+            # Save again in storage
+            try:
+                generated_time = tileset.save_tile(tile, new_layers)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Error when saving: {str(e)}")
+
+            # Return status
+            return Response(
+                content=json.dumps({
+                    "tile": f"{prefix}/{zoom}/{x}/{y}",
+                    "status": "regenerated",
+                    "generated": generated_time.isoformat() if generated_time else "unknown"
+                }, indent=2),
+                media_type="application/json"
+            )
+
+        else:
+            status_info = {
+                "tile": f"{prefix}/{zoom}/{x}/{y}",
+                "message": "Tile regeneration is not enabled.",
+            }
+
+        return Response(content=json.dumps(status_info, indent=2), media_type="application/json")
+    except Exception as e:
+        return Response(content=json.dumps({"error": str(e)}, indent=2), media_type="application/json")
+
+
+@common_router.get("/{prefix}/{zoom}/{x}/{y}/status")
+def get_status(prefix: str, zoom: int, x: int, y: int):
+    try:
+        config = tilekiln.load_config(os.environ[TILEKILN_CONFIG])
+
+        if config.status is True:
+            if prefix not in tilesets:
+                raise HTTPException(status_code=404, detail=f"Tileset '{prefix}' not found.")
+
+            try:
+                tile = Tile(zoom, x, y)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+
+            try:
+                tile_data, generated = tilesets[prefix].get_tile(tile)
+            except tilekiln.errors.ZoomNotDefined:
+                raise HTTPException(status_code=410, detail=f"Zoom level {zoom} not defined for tileset '{prefix}'.")
+
+            missing_layers = [layer for layer, data in tile_data.items() if data is None]
+            present_layers = [layer for layer, data in tile_data.items() if data is not None]
+
+            status_info = {
+                "tile": f"{prefix}/{zoom}/{x}/{y}",
+                "status": "partial" if missing_layers else "complete",
+                "present_layers": present_layers,
+                "missing_layers": missing_layers,
+                "last_generated": generated.isoformat() if generated else "unknown",
+            }
+        else:
+            status_info = {
+                "tile": f"{prefix}/{zoom}/{x}/{y}",
+                "message": "Status reporting not enabled.",
+            }
+
+        return Response(content=json.dumps(status_info, indent=2), media_type="application/json")
+    except Exception as e:
+        return Response(content=json.dumps({"error": str(e)}, indent=2), media_type="application/json")
+
+
+server.include_router(common_router)
+live.include_router(common_router)

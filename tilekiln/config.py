@@ -38,6 +38,8 @@ class Config:
         self.version = metadata.get("version")
         self.bounds = metadata.get("bounds")
         self.center = metadata.get("center")
+        self.status = metadata.get("status", False)
+        self.dirty = metadata.get("dirty", False)
         self.__layers = {}
         try:
             for id, l in config.get("vector_layers", {}).items():

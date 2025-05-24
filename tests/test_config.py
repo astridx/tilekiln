@@ -23,6 +23,8 @@ class TestConfig(TestCase):
             self.assertEqual(c.center, None)
             self.assertEqual(c.minzoom, None)
             self.assertEqual(c.maxzoom, None)
+            self.assertEqual(c.status, False)
+            self.assertEqual(c.dirty, False)
 
             self.assertEqual(c.tilejson("bar"), '''{
     "scheme": "xyz",
@@ -37,6 +39,8 @@ class TestConfig(TestCase):
             c_str = ('''{"metadata": {"id":"id", '''
                      '''"name": "name", '''
                      '''"description":"description", '''
+                     '''"status":True, '''
+                     '''"dirty":False, '''
                      '''"attribution":"attribution", "version": "1.0.0",'''
                      '''"bounds": [-180, -85, 180, 85], "center": [0, 0]},'''
                      '''"vector_layers": {"building":{'''
@@ -50,6 +54,8 @@ class TestConfig(TestCase):
             self.assertEqual(c.id, "id")
             self.assertEqual(c.name, "name")
             self.assertEqual(c.description, "description")
+            self.assertEqual(c.status, True)
+            self.assertEqual(c.dirty, False)
             self.assertEqual(c.attribution, "attribution")
             self.assertEqual(c.version, "1.0.0")
             self.assertEqual(c.bounds, [-180, -85, 180, 85])
